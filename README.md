@@ -15,7 +15,7 @@ macOS and Linux users: see the [Homebrew tap](https://github.com/cratestack/home
 
 ## How updates work
 
-Nobody edits `bucket/corntchap-cli.json` by hand. The `update` workflow runs hourly (and on demand: Actions, update, Run workflow, optionally with a tag) on the default branch only, in three jobs:
+Nobody edits `bucket/corntchap-cli.json` by hand. The `update` workflow runs every 12 hours (and on demand: Actions, update, Run workflow, optionally with a tag — `gh workflow run update.yml --repo cratestack/scoop-bucket -f tag=vX.Y.Z` right after a corntchap release) on the default branch only, in three jobs:
 
 1. **render**: checks that `cratestack/corntchap` exists and is public, asks GitHub for its latest release (no release yet means it exits quietly; an explicit tag that does not exist is an error), downloads the release's `corntchap-cli-windows-x86_64.zip.sha256` and runs `scripts/render-manifest.sh`;
 2. **test**: installs the rendered manifest on real runners (the `test` workflow, Windows), before anything is pushed;
