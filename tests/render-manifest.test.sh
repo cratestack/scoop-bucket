@@ -21,10 +21,19 @@ mk_release() {
 }
 
 # seed_manifest FILE VERSION: the committed manifest brought to VERSION by the script itself
+# The state before any release, whatever is committed today: the committed manifest reset to 0.1.0 with
+# an all-zero hash (once a release is published the committed manifest pins a real hash, and the repin
+# guard rightly refuses to replace it with a test hash).
+placeholder_manifest() {
+  jq --arg url "https://github.com/cratestack/corntchap/releases/download/v0.1.0/$ZIP" \
+    '.version = "0.1.0" | .architecture["64bit"].url = $url | .architecture["64bit"].hash = ("0" * 64)' \
+    "$root/bucket/corntchap-cli.json" > "$1"
+}
+
 seed_manifest() {
   local d="$work/seed-$2"
   rm -rf "$d"; mk_release "$d" "v$2"
-  cp "$root/bucket/corntchap-cli.json" "$1"
+  placeholder_manifest "$1"
   "$RENDER" "$d/release.json" "$d/shas" "$1" > /dev/null 2>&1
 }
 
@@ -63,7 +72,7 @@ check "second run is a no-op (byte-identical)" $?
 
 # the committed placeholder manifest (0.1.0) is replaced by a 0.1.0 release (same version is not a downgrade)
 d=$work/first; mk_release "$d" v0.1.0
-f=$work/placeholder.json; cp "$root/bucket/corntchap-cli.json" "$f"
+f=$work/placeholder.json; placeholder_manifest "$f"
 grep -qE '"hash": "0{64}"' "$f" && "$RENDER" "$d/release.json" "$d/shas" "$f" > /dev/null 2>&1 && ! grep -qE '"hash": "0{64}"' "$f" && [ "$(jq -r '.architecture["64bit"].hash' "$f")" = "$(hex 7)" ]
 check "first release replaces the committed placeholder hash" $?
 
