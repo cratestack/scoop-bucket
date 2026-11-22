@@ -1,0 +1,26 @@
+{
+    "version": "0.1.0",
+    "description": "Command-line board and relay for the corntchap agent coordination server",
+    "homepage": "https://github.com/cratestack/corntchap",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/cratestack/corntchap/releases/download/v0.1.0/corntchap-cli-windows-x86_64.zip",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    },
+    "bin": "corntchap-cli.exe",
+    "checkver": {
+        "github": "https://github.com/cratestack/corntchap"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/cratestack/corntchap/releases/download/v$version/corntchap-cli-windows-x86_64.zip",
+                "hash": {
+                    "url": "$url.sha256"
+                }
+            }
+        }
+    }
+}

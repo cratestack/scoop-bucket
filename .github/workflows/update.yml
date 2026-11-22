@@ -1,0 +1,94 @@
+name: update
+# Follows the latest release of cratestack/corntchap: rewrites version, url and hash in
+# bucket/corntchap-cli.json from the release's .sha256 file, commits when it changed, then runs the install test.
+on:
+  schedule:
+    - cron: "37 * * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (vX.Y.Z). Empty: the latest release."
+        required: false
+        type: string
+permissions:
+  contents: read
+# two runs must not race on the same push
+concurrency:
+  group: update-manifest
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the regenerated manifest; the job token is the only credential
+    outputs:
+      changed: ${{ steps.commit.outputs.changed }}
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: fetch the release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }} # untrusted: only ever read from the environment, validated below
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "$INPUT_TAG" ]; then
+            [[ $INPUT_TAG =~ ^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]] || { echo "::error::tag input is not vMAJOR.MINOR.PATCH"; exit 1; }
+            args=("$INPUT_TAG")
+          fi
+          if ! gh release view "${args[@]}" --repo cratestack/corntchap --json tagName,assets > release.json 2> err.txt; then
+            if grep -qi 'release not found' err.txt; then
+              echo "No release of cratestack/corntchap yet; nothing to do."
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            cat err.txt >&2
+            exit 1
+          fi
+          tag=$(jq -er '.tagName' release.json)
+          [[ $tag =~ ^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]] || { echo "::error::release tag is not vMAJOR.MINOR.PATCH"; exit 1; }
+          mkdir shas
+          gh release download "$tag" --repo cratestack/corntchap --pattern 'corntchap-cli-windows-x86_64.zip.sha256' --dir shas
+          echo "found=true" >> "$GITHUB_OUTPUT"
+      - name: render the manifest
+        if: steps.release.outputs.found == 'true'
+        run: |
+          set +e
+          scripts/render-manifest.sh release.json shas bucket/corntchap-cli.json
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            10) echo "Release is older than the manifest; leaving it as is." ;; # never downgrade
+            *) echo "::error::render-manifest.sh refused the release (exit $rc)"; exit 1 ;;
+          esac
+      - name: commit
+        id: commit
+        if: steps.release.outputs.found == 'true'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if git diff --quiet -- bucket; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Manifest is up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          version=$(jq -r .version bucket/corntchap-cli.json)
+          git add bucket/corntchap-cli.json
+          git commit -m "corntchap-cli $version"
+          git push origin "HEAD:$DEFAULT_BRANCH"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  # a push made with the job token does not start other workflows, so the install test is called from here
+  test:
+    needs: update
+    if: needs.update.outputs.changed == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ needs.update.outputs.sha }}

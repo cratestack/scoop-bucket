@@ -1,0 +1,74 @@
+name: test
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit to test (the update workflow passes the commit it just pushed)"
+        required: false
+        type: string
+        default: ""
+permissions:
+  contents: read
+env:
+  # Scoop's manifest schema, pinned to a commit so a schema change cannot break this suddenly
+  SCOOP_SCHEMA: https://raw.githubusercontent.com/ScoopInstaller/Scoop/e6aa3b366bdee8ed138c1e0f7b85192ebdd35d0f/schema.json
+jobs:
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+      - name: shellcheck
+        run: shellcheck scripts/*.sh && shellcheck -e SC2319,SC2016 tests/*.sh
+      - name: render-manifest.sh guards
+        run: tests/render-manifest.test.sh
+      - name: every guard is covered (mutation)
+        run: tests/mutate.sh
+  schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+      - name: validate the manifest against Scoop's schema
+        run: |
+          curl -fsSL "$SCOOP_SCHEMA" -o schema.json
+          npx -y ajv-cli@5.0.0 validate -s schema.json -d bucket/corntchap-cli.json --strict=false
+  install:
+    needs: [scripts, schema]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+      - name: is there a release to install?
+        id: gate
+        shell: bash
+        run: |
+          # the committed manifest carries an all-zero placeholder hash until the update workflow has seen a release
+          if grep -qE '"hash": "0{64}"' bucket/corntchap-cli.json; then
+            echo "No release rendered yet (all-zero placeholder hash); skipping the install test."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: install Scoop
+        if: steps.gate.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          iex "& {$(irm get.scoop.sh)} -RunAsAdmin"
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\scoop\shims"
+      - name: scoop install from the manifest
+        if: steps.gate.outputs.skip != 'true'
+        shell: pwsh
+        run: scoop install .\bucket\corntchap-cli.json
+      - name: corntchap-cli --version
+        if: steps.gate.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $want = (Get-Content bucket\corntchap-cli.json | ConvertFrom-Json).version
+          $got = corntchap-cli --version
+          Write-Host $got
+          if ($got -notmatch [regex]::Escape($want)) { throw "expected version $want, got: $got" }
