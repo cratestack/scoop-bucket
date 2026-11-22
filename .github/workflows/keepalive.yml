@@ -1,0 +1,24 @@
+name: keepalive
+# GitHub disables scheduled workflows after 60 days without repository activity (public repos).
+# Re-enabling a workflow resets that timer, so once a month this re-enables update.yml (and itself).
+on:
+  schedule:
+    - cron: "11 4 1 * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for wf in update.yml keepalive.yml; do
+            gh api -X PUT "repos/$REPO/actions/workflows/$wf/enable"
+            echo "enabled $wf"
+          done

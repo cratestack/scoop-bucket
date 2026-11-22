@@ -5,8 +5,8 @@ on:
     branches: [main]
   workflow_call:
     inputs:
-      ref:
-        description: "Commit to test (the update workflow passes the commit it just pushed)"
+      artifact:
+        description: "Name of an artifact holding a candidate corntchap-cli.json to test in place of the committed one (the update workflow's, before it pushes)"
         required: false
         type: string
         default: ""
@@ -15,13 +15,13 @@ permissions:
 env:
   # Scoop's manifest schema, pinned to a commit so a schema change cannot break this suddenly
   SCOOP_SCHEMA: https://raw.githubusercontent.com/ScoopInstaller/Scoop/e6aa3b366bdee8ed138c1e0f7b85192ebdd35d0f/schema.json
+  # the Scoop installer script, pinned to a commit (it still downloads Scoop itself from its master branch)
+  SCOOP_INSTALLER: https://raw.githubusercontent.com/ScoopInstaller/Install/1e2f334083d609986d8c8bc9e31ae8e87c39fab4/install.ps1
 jobs:
   scripts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.ref }}
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: shellcheck
         run: shellcheck scripts/*.sh && shellcheck -e SC2319,SC2016 tests/*.sh
       - name: render-manifest.sh guards
@@ -31,9 +31,15 @@ jobs:
   schema:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - if: inputs.artifact != ''
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          ref: ${{ inputs.ref }}
+          name: ${{ inputs.artifact }}
+          path: candidate
+      - if: inputs.artifact != ''
+        shell: bash
+        run: cp "candidate/corntchap-cli.json" bucket/corntchap-cli.json
       - name: validate the manifest against Scoop's schema
         run: |
           curl -fsSL "$SCOOP_SCHEMA" -o schema.json
@@ -42,9 +48,15 @@ jobs:
     needs: [scripts, schema]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - if: inputs.artifact != ''
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          ref: ${{ inputs.ref }}
+          name: ${{ inputs.artifact }}
+          path: candidate
+      - if: inputs.artifact != ''
+        shell: bash
+        run: cp "candidate/corntchap-cli.json" bucket/corntchap-cli.json
       - name: is there a release to install?
         id: gate
         shell: bash
@@ -58,7 +70,8 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         shell: pwsh
         run: |
-          iex "& {$(irm get.scoop.sh)} -RunAsAdmin"
+          Invoke-RestMethod -Uri $env:SCOOP_INSTALLER -OutFile "$env:RUNNER_TEMP\install-scoop.ps1"
+          & "$env:RUNNER_TEMP\install-scoop.ps1" -RunAsAdmin
           Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\scoop\shims"
       - name: scoop install from the manifest
         if: steps.gate.outputs.skip != 'true'
@@ -68,7 +81,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         shell: pwsh
         run: |
-          $want = (Get-Content bucket\corntchap-cli.json | ConvertFrom-Json).version
-          $got = corntchap-cli --version
+          $want = "corntchap-cli " + (Get-Content bucket\corntchap-cli.json | ConvertFrom-Json).version
+          $got = (corntchap-cli --version | Out-String).Trim()
           Write-Host $got
-          if ($got -notmatch [regex]::Escape($want)) { throw "expected version $want, got: $got" }
+          if ($got -ne $want) { throw "expected '$want', got '$got'" }

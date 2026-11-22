@@ -16,8 +16,8 @@ mk_release() {
   local d=$1 tag=$2
   mkdir -p "$d/shas"
   printf '%s  %s\n' "$(hex 7)" "$ZIP" > "$d/shas/$ZIP.sha256"
-  jq -n --arg t "$tag" --arg z "$ZIP" \
-    '{tagName:$t,assets:[{name:"corntchap-cli-linux-x86_64.tar.gz"},{name:$z},{name:($z+".sha256")},{name:"install.sh"}]}' > "$d/release.json"
+  jq -n --arg t "$tag" --arg z "$ZIP" --arg h "$(hex 7)" \
+    '{tagName:$t,assets:[{name:"corntchap-cli-linux-x86_64.tar.gz"},{name:$z,digest:("sha256:"+$h)},{name:($z+".sha256")},{name:"install.sh"}]}' > "$d/release.json"
 }
 
 # seed_manifest FILE VERSION: the committed manifest brought to VERSION by the script itself
@@ -82,6 +82,47 @@ expect_refusal "sha-format: 63 hex chars is refused" 1 "not 64 lowercase hex" "$
 d=$work/upper; mk_release "$d" v0.2.0
 printf '%s  %s\n' "$(hex 7 | sed 's/^0/G/')" "$ZIP" > "$d/shas/$ZIP.sha256"
 expect_refusal "sha-format: non-hex characters are refused" 1 "not 64 lowercase hex" "$d"
+d=$work/upper2; mk_release "$d" v0.2.0
+printf '%s  %s\n' "$(printf 'A%.0s' $(seq 64))" "$ZIP" > "$d/shas/$ZIP.sha256"
+jq '(.assets[] | select(.name == "'$ZIP'") | .digest) = "sha256:'"$(printf 'A%.0s' $(seq 64))"'"' "$d/release.json" > "$d/r" && mv "$d/r" "$d/release.json"
+expect_refusal "sha-format: 64 UPPERCASE hex chars (digest agrees) is refused" 1 "not 64 lowercase hex" "$d"
+# GUARD:sha-anchors: valid hex first, junk after it
+d=$work/prefixed; mk_release "$d" v0.2.0
+printf '%s","bin":"evil.exe","x":"  %s\n' "$(hex 7)" "$ZIP" > "$d/shas/$ZIP.sha256"
+expect_refusal "sha-anchors: 64 hex followed by json is refused" 1 "not 64 lowercase hex" "$d"
+d=$work/prefixed2; mk_release "$d" v0.2.0
+printf '%s"; x' "$(hex 7)" > "$d/shas/$ZIP.sha256"
+expect_refusal "sha-anchors: 64 hex then junk, no filename, is refused" 1 "not 64 lowercase hex" "$d"
+d=$work/prefixed3; mk_release "$d" v0.2.0
+printf 'x%s  %s\n' "$(hex 7)" "$ZIP" > "$d/shas/$ZIP.sha256"
+expect_refusal "sha-anchors: a leading junk character is refused" 1 "not 64 lowercase hex" "$d"
+# GUARD:tag-anchors
+d=$work/evil4; mk_release "$d" 'evilv1.0.0'
+expect_refusal "tag-anchors: a prefix before the version is refused" 1 "refusing tag" "$d"
+d=$work/evil5; mk_release "$d" 'v1.0.0evil'
+expect_refusal "tag-anchors: a suffix after the version is refused" 1 "refusing tag" "$d"
+# GUARD:sha-lines
+d=$work/twolines; mk_release "$d" v0.2.0
+printf '%s  %s\n%s  other\n' "$(hex 7)" "$ZIP" "$(hex 5)" > "$d/shas/$ZIP.sha256"
+expect_refusal "sha-lines: a second line is refused" 1 "exactly one line" "$d"
+d=$work/blankline; mk_release "$d" v0.2.0
+printf '%s  %s\n\n' "$(hex 7)" "$ZIP" > "$d/shas/$ZIP.sha256"
+expect_refusal "sha-lines: a trailing blank line is refused" 1 "exactly one line" "$d"
+# GUARD:digest
+d=$work/baddigest; mk_release "$d" v0.2.0
+jq '(.assets[] | select(.name == "'$ZIP'") | .digest) = "sha256:'"$(hex 99)"'"' "$d/release.json" > "$d/r" && mv "$d/r" "$d/release.json"
+expect_refusal "digest: a .sha256 that disagrees with GitHub's digest is refused" 1 "does not match" "$d"
+d=$work/nodigest; mk_release "$d" v0.2.0
+jq 'del(.assets[] | select(.name == "'$ZIP'") | .digest)' "$d/release.json" > "$d/r" && mv "$d/r" "$d/release.json"
+expect_refusal "digest: an asset without a digest is refused" 1 "digest ''" "$d"
+# GUARD:repin: pinned 0.1.0 with a real hash, then the same tag with another hash
+f=$work/repin.json; seed_manifest "$f" 0.1.0
+d=$work/swapped; mk_release "$d" v0.1.0
+printf '%s  %s\n' "$(hex 44)" "$ZIP" > "$d/shas/$ZIP.sha256"
+jq '(.assets[] | select(.name == "'$ZIP'") | .digest) = "sha256:'"$(hex 44)"'"' "$d/release.json" > "$d/r" && mv "$d/r" "$d/release.json"
+expect_refusal "repin: the same version with a different hash is refused" 1 "refusing to re-pin" "$d" "$f"
+d=$work/same; mk_release "$d" v0.1.0
+"$RENDER" "$d/release.json" "$d/shas" "$f" 2>&1 | grep -q "already at 0.1.0"; check "repin: the same version with the same hash is accepted" $?
 d=$work/jsonhash; mk_release "$d" v0.2.0
 printf '%s  %s\n' '","bin":"evil.exe","x":"' "$ZIP" > "$d/shas/$ZIP.sha256"
 expect_refusal "sha-format: a hash carrying json is refused" 1 "not 64 lowercase hex" "$d"
@@ -107,6 +148,9 @@ expect_refusal "downgrade: an older release is skipped (rc 10)" 10 "older than t
 d=$work/older2; mk_release "$d" v0.1.0
 f=$work/manifest-newer.json; seed_manifest "$f" 0.10.0
 expect_refusal "downgrade: 0.1.0 is older than 0.10.0 (numeric, not lexical)" 10 "older than the manifest" "$d" "$f"
+d=$work/older3; mk_release "$d" v0.1.1
+f=$work/manifest-patch.json; seed_manifest "$f" 0.1.2
+expect_refusal "downgrade: a patch-level downgrade (0.1.1 < 0.1.2) is skipped" 10 "older than the manifest" "$d" "$f"
 # GUARD:manifest-version
 d=$work/ok2; mk_release "$d" v0.2.0
 f=$work/manifest-bad.json; jq '.version = "nightly"' "$root/bucket/corntchap-cli.json" > "$f"

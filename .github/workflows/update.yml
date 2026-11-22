@@ -1,6 +1,7 @@
 name: update
-# Follows the latest release of cratestack/corntchap: rewrites version, url and hash in
-# bucket/corntchap-cli.json from the release's .sha256 file, commits when it changed, then runs the install test.
+# Follows the latest release of cratestack/corntchap. render: rewrite bucket/corntchap-cli.json from the release's
+# digests and .sha256 files. test: install the rendered file on real runners. publish: push it, only
+# if the test passed. Nothing reaches the default branch before it has been installed.
 on:
   schedule:
     - cron: "37 * * * *"
@@ -17,15 +18,17 @@ concurrency:
   group: update-manifest
   cancel-in-progress: false
 jobs:
-  update:
+  render:
+    # the workflow file runs from the branch it was dispatched on: only the default branch may publish
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # push the regenerated manifest; the job token is the only credential
     outputs:
-      changed: ${{ steps.commit.outputs.changed }}
-      sha: ${{ steps.commit.outputs.sha }}
+      changed: ${{ steps.diff.outputs.changed }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
       - name: fetch the release
         id: release
         env:
@@ -33,13 +36,17 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }} # untrusted: only ever read from the environment, validated below
         run: |
           set -euo pipefail
+          # "release not found" is also what a missing or private repo answers: assert the source first
+          vis=$(gh repo view cratestack/corntchap --json visibility --jq .visibility) \
+            || { echo "::error::cannot read cratestack/corntchap"; exit 1; }
+          [ "$vis" = PUBLIC ] || { echo "::error::cratestack/corntchap is $vis, expected PUBLIC"; exit 1; }
           args=()
           if [ -n "$INPUT_TAG" ]; then
             [[ $INPUT_TAG =~ ^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]] || { echo "::error::tag input is not vMAJOR.MINOR.PATCH"; exit 1; }
             args=("$INPUT_TAG")
           fi
-          if ! gh release view "${args[@]}" --repo cratestack/corntchap --json tagName,assets > release.json 2> err.txt; then
-            if grep -qi 'release not found' err.txt; then
+          if ! gh release view "${args[@]}" --repo cratestack/corntchap --json tagName,assets,isImmutable > release.json 2> err.txt; then
+            if [ -z "$INPUT_TAG" ] && grep -qi 'release not found' err.txt; then
               echo "No release of cratestack/corntchap yet; nothing to do."
               echo "found=false" >> "$GITHUB_OUTPUT"
               exit 0
@@ -64,31 +71,54 @@ jobs:
             10) echo "Release is older than the manifest; leaving it as is." ;; # never downgrade
             *) echo "::error::render-manifest.sh refused the release (exit $rc)"; exit 1 ;;
           esac
-      - name: commit
-        id: commit
-        if: steps.release.outputs.found == 'true'
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      - name: changed?
+        id: diff
         run: |
           if git diff --quiet -- bucket; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "Manifest is up to date."
-            exit 0
+            echo "The manifest is up to date."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
+      - if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate
+          path: bucket/corntchap-cli.json
+          if-no-files-found: error
+          retention-days: 1
+  # the candidate is installed here, before anything is pushed
+  test:
+    needs: render
+    if: needs.render.outputs.changed == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test.yml
+    with:
+      artifact: candidate
+  publish:
+    needs: [render, test]
+    if: needs.render.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the tested manifest; the job token is the only credential
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: candidate
+          path: candidate
+      - name: commit and push
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          cp candidate/corntchap-cli.json bucket/corntchap-cli.json
+          if git diff --quiet -- bucket; then echo "Nothing to publish."; exit 0; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           version=$(jq -r .version bucket/corntchap-cli.json)
           git add bucket/corntchap-cli.json
           git commit -m "corntchap-cli $version"
           git push origin "HEAD:$DEFAULT_BRANCH"
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-  # a push made with the job token does not start other workflows, so the install test is called from here
-  test:
-    needs: update
-    if: needs.update.outputs.changed == 'true'
-    permissions:
-      contents: read
-    uses: ./.github/workflows/test.yml
-    with:
-      ref: ${{ needs.update.outputs.sha }}

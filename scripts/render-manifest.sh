@@ -10,8 +10,15 @@
 # Exit 0: MANIFEST is up to date (rewritten, or already identical). Exit 10: skipped, the release is
 # older than the manifest (never downgrade). Anything else: refused, MANIFEST is untouched.
 #
-# The tag and the hash come from a release, so they are untrusted: each is validated against a strict
-# pattern, and values reach the JSON only through `jq --arg` (never by string splicing).
+# What this does and does not protect (trust on first use of a release):
+#  - the tag and the hash are validated against strict patterns, and values reach the JSON only
+#    through `jq --arg` (never by string splicing);
+#  - the zip's hash in its .sha256 file must equal the `digest` GitHub itself computed for the asset,
+#    so a .sha256 that disagrees with the archive it names is refused;
+#  - once a version is pinned with a real hash, the same version is never re-pinned to a different
+#    hash (a swapped asset is refused), and an older release never replaces a newer one.
+# It does NOT detect a release that was already compromised when first published: the first release
+# seen is trusted. Immutable releases (`isImmutable`) would close the swap window on GitHub's side.
 # Each `# GUARD:<name>` line is covered by a test in tests/render-manifest.test.sh.
 set -euo pipefail
 
@@ -26,8 +33,8 @@ release=$1 shas=$2 manifest=$3
 command -v jq > /dev/null || die "jq is required"
 
 num='(0|[1-9][0-9]{0,8})'
-tag_re="^v$num\\.$num\\.$num\$"
-sha_re='^[0-9a-f]{64}$'
+tag_re="^v$num\\.$num\\.$num\$" # GUARD:tag-anchors
+sha_re='^[0-9a-f]{64}$' # GUARD:sha-anchors
 name=corntchap-cli-windows-x86_64.zip
 
 tag=$(jq -er '.tagName | strings' "$release") || die "release JSON has no tagName"
@@ -57,10 +64,18 @@ jq -e --arg n "$name.sha256" 'any(.assets[]?; .name == $n)' "$release" > /dev/nu
   || die "release $tag has no asset $name.sha256" # GUARD:asset-sha
 f=$shas/$name.sha256
 [ -f "$f" ] || die "missing $f" # GUARD:sha-file
+[ "$(grep -c '' "$f")" = 1 ] || die "$f must hold exactly one line" # GUARD:sha-lines
 line=$(cat "$f")
 hash=${line%%  *}
 [[ $hash =~ $sha_re ]] || die "$name.sha256: '${hash:0:80}' is not 64 lowercase hex characters" # GUARD:sha-format
 [ "$line" = "$hash  $name" ] || die "$name.sha256 does not name $name" # GUARD:sha-name
+dg=$(jq -r --arg n "$name" '[.assets[]? | select(.name == $n) | .digest // empty] | first // empty' "$release")
+[ "$dg" = "sha256:$hash" ] || die "$name: GitHub's digest '${dg:0:80}' does not match the .sha256 file's $hash" # GUARD:digest
+curhash=$(jq -r '.architecture["64bit"].hash // empty' "$manifest")
+if [ "$cur" = "$ver" ] && [[ $curhash =~ ^[0-9a-f]{64}$ && ! $curhash =~ ^0+$ ]]; then
+  [ "$curhash" = "$hash" ] || die "refusing to re-pin $name at $ver: pinned $curhash, release now says $hash" # GUARD:repin
+fi
+jq -e '.isImmutable == true' "$release" > /dev/null || echo "note: release $tag is not immutable (trust on first use)" >&2
 
 tmp=$(mktemp "$manifest.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
