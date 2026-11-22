@@ -6,7 +6,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/cratestack/corntchap/releases/download/v0.1.0/corntchap-cli-windows-x86_64.zip",
-            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+            "hash": "f32690b7788dfcc17ea72768ee6b9a789f61e846753bb3a7a5b5e67ea1cc9434"
         }
     },
     "bin": "corntchap-cli.exe",
